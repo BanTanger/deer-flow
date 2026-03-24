@@ -1,14 +1,15 @@
-"""Tests for src.models.factory.create_chat_model."""
+"""Tests for deerflow.models.factory.create_chat_model."""
 
 from __future__ import annotations
 
 import pytest
 from langchain.chat_models import BaseChatModel
 
-from src.config.app_config import AppConfig
-from src.config.model_config import ModelConfig
-from src.config.sandbox_config import SandboxConfig
-from src.models import factory as factory_module
+from deerflow.config.app_config import AppConfig
+from deerflow.config.model_config import ModelConfig
+from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.models import factory as factory_module
+from deerflow.models import openai_codex_provider as codex_provider_module
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -18,7 +19,7 @@ from src.models import factory as factory_module
 def _make_app_config(models: list[ModelConfig]) -> AppConfig:
     return AppConfig(
         models=models,
-        sandbox=SandboxConfig(use="src.sandbox.local:LocalSandboxProvider"),
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
     )
 
 
@@ -30,6 +31,7 @@ def _make_model(
     supports_reasoning_effort: bool = False,
     when_thinking_enabled: dict | None = None,
     thinking: dict | None = None,
+    max_tokens: int | None = None,
 ) -> ModelConfig:
     return ModelConfig(
         name=name,
@@ -37,6 +39,7 @@ def _make_model(
         description=None,
         use=use,
         model=name,
+        max_tokens=max_tokens,
         supports_thinking=supports_thinking,
         supports_reasoning_effort=supports_reasoning_effort,
         when_thinking_enabled=when_thinking_enabled,
@@ -410,3 +413,212 @@ def test_thinking_shortcut_not_leaked_into_model_when_disabled(monkeypatch):
 
     # The disable path should have set thinking to disabled (not the raw enabled shortcut)
     assert captured.get("thinking") == {"type": "disabled"}
+
+
+# ---------------------------------------------------------------------------
+# OpenAI-compatible providers (MiniMax, Novita, etc.)
+# ---------------------------------------------------------------------------
+
+
+def test_openai_compatible_provider_passes_base_url(monkeypatch):
+    """OpenAI-compatible providers like MiniMax should pass base_url through to the model."""
+    model = ModelConfig(
+        name="minimax-m2.5",
+        display_name="MiniMax M2.5",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="MiniMax-M2.5",
+        base_url="https://api.minimax.io/v1",
+        api_key="test-key",
+        max_tokens=4096,
+        temperature=1.0,
+        supports_vision=True,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="minimax-m2.5")
+
+    assert captured.get("model") == "MiniMax-M2.5"
+    assert captured.get("base_url") == "https://api.minimax.io/v1"
+    assert captured.get("api_key") == "test-key"
+    assert captured.get("temperature") == 1.0
+    assert captured.get("max_tokens") == 4096
+
+
+def test_openai_compatible_provider_multiple_models(monkeypatch):
+    """Multiple models from the same OpenAI-compatible provider should coexist."""
+    m1 = ModelConfig(
+        name="minimax-m2.5",
+        display_name="MiniMax M2.5",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="MiniMax-M2.5",
+        base_url="https://api.minimax.io/v1",
+        api_key="test-key",
+        temperature=1.0,
+        supports_vision=True,
+        supports_thinking=False,
+    )
+    m2 = ModelConfig(
+        name="minimax-m2.5-highspeed",
+        display_name="MiniMax M2.5 Highspeed",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="MiniMax-M2.5-highspeed",
+        base_url="https://api.minimax.io/v1",
+        api_key="test-key",
+        temperature=1.0,
+        supports_vision=True,
+        supports_thinking=False,
+    )
+    cfg = _make_app_config([m1, m2])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    # Create first model
+    factory_module.create_chat_model(name="minimax-m2.5")
+    assert captured.get("model") == "MiniMax-M2.5"
+
+    # Create second model
+    factory_module.create_chat_model(name="minimax-m2.5-highspeed")
+    assert captured.get("model") == "MiniMax-M2.5-highspeed"
+
+
+# ---------------------------------------------------------------------------
+# Codex provider reasoning_effort mapping
+# ---------------------------------------------------------------------------
+
+
+class FakeCodexChatModel(FakeChatModel):
+    pass
+
+
+def test_codex_provider_disables_reasoning_when_thinking_disabled(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "codex",
+                use="deerflow.models.openai_codex_provider:CodexChatModel",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg, model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="codex", thinking_enabled=False)
+
+    assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "none"
+
+
+def test_codex_provider_preserves_explicit_reasoning_effort(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "codex",
+                use="deerflow.models.openai_codex_provider:CodexChatModel",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg, model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="codex", thinking_enabled=True, reasoning_effort="high")
+
+    assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "high"
+
+
+def test_codex_provider_defaults_reasoning_effort_to_medium(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "codex",
+                use="deerflow.models.openai_codex_provider:CodexChatModel",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg, model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="codex", thinking_enabled=True)
+
+    assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "medium"
+
+
+def test_codex_provider_strips_unsupported_max_tokens(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "codex",
+                use="deerflow.models.openai_codex_provider:CodexChatModel",
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+                max_tokens=4096,
+            )
+        ]
+    )
+    _patch_factory(monkeypatch, cfg, model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="codex", thinking_enabled=True)
+
+    assert "max_tokens" not in FakeChatModel.captured_kwargs
+    
+    
+def test_openai_responses_api_settings_are_passed_to_chatopenai(monkeypatch):
+    model = ModelConfig(
+        name="gpt-5-responses",
+        display_name="GPT-5 Responses",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="gpt-5",
+        api_key="test-key",
+        use_responses_api=True,
+        output_version="responses/v1",
+        supports_thinking=False,
+        supports_vision=True,
+    )
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: CapturingModel)
+
+    factory_module.create_chat_model(name="gpt-5-responses")
+
+    assert captured.get("use_responses_api") is True
+    assert captured.get("output_version") == "responses/v1"

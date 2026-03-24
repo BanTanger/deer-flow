@@ -31,6 +31,7 @@ This document provides a comprehensive overview of the DeerFlow backend architec
 │  - Thread Mgmt      │ │  - MCP Config       │ │  - React UI         │
 │  - SSE Streaming    │ │  - Skills Mgmt      │ │  - Chat Interface   │
 │  - Checkpointing    │ │  - File Uploads     │ │                     │
+│                     │ │  - Thread Cleanup   │ │                     │
 │                     │ │  - Artifacts        │ │                     │
 └─────────────────────┘ └─────────────────────┘ └─────────────────────┘
           │                       │
@@ -55,7 +56,7 @@ This document provides a comprehensive overview of the DeerFlow backend architec
 
 The LangGraph server is the core agent runtime, built on LangGraph for robust multi-agent workflow orchestration.
 
-**Entry Point**: `src/agents/lead_agent/agent.py:make_lead_agent`
+**Entry Point**: `packages/harness/deerflow/agents/lead_agent/agent.py:make_lead_agent`
 
 **Key Responsibilities**:
 - Agent creation and configuration
@@ -70,7 +71,7 @@ The LangGraph server is the core agent runtime, built on LangGraph for robust mu
 {
   "agent": {
     "type": "agent",
-    "path": "src.agents:make_lead_agent"
+    "path": "deerflow.agents:make_lead_agent"
   }
 }
 ```
@@ -79,14 +80,18 @@ The LangGraph server is the core agent runtime, built on LangGraph for robust mu
 
 FastAPI application providing REST endpoints for non-agent operations.
 
-**Entry Point**: `src/gateway/app.py`
+**Entry Point**: `app/gateway/app.py`
 
 **Routers**:
 - `models.py` - `/api/models` - Model listing and details
 - `mcp.py` - `/api/mcp` - MCP server configuration
 - `skills.py` - `/api/skills` - Skills management
 - `uploads.py` - `/api/threads/{id}/uploads` - File upload
+- `threads.py` - `/api/threads/{id}` - Local DeerFlow thread data cleanup after LangGraph deletion
 - `artifacts.py` - `/api/threads/{id}/artifacts` - Artifact serving
+- `suggestions.py` - `/api/threads/{id}/suggestions` - Follow-up suggestion generation
+
+The web conversation delete flow is now split across both backend surfaces: LangGraph handles `DELETE /api/langgraph/threads/{thread_id}` for thread state, then the Gateway `threads.py` router removes DeerFlow-managed filesystem data via `Paths.delete_thread_dir()`.
 
 ### Agent Architecture
 
@@ -158,7 +163,7 @@ class ThreadState(AgentState):
               ▼                                         ▼
 ┌─────────────────────────┐              ┌─────────────────────────┐
 │  LocalSandboxProvider   │              │  AioSandboxProvider     │
-│  (src/sandbox/local.py) │              │  (src/community/)       │
+│  (packages/harness/deerflow/sandbox/local.py) │              │  (packages/harness/deerflow/community/)       │
 │                         │              │                         │
 │  - Singleton instance   │              │  - Docker-based         │
 │  - Direct execution     │              │  - Isolated containers  │
@@ -192,7 +197,7 @@ class ThreadState(AgentState):
 
 ┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐
 │   Built-in Tools    │  │  Configured Tools   │  │     MCP Tools       │
-│  (src/tools/)       │  │  (config.yaml)      │  │  (extensions.json)  │
+│  (packages/harness/deerflow/tools/)       │  │  (config.yaml)      │  │  (extensions.json)  │
 ├─────────────────────┤  ├─────────────────────┤  ├─────────────────────┤
 │ - present_file      │  │ - web_search        │  │ - github            │
 │ - ask_clarification │  │ - web_fetch         │  │ - filesystem        │
@@ -208,7 +213,7 @@ class ThreadState(AgentState):
                                    ▼
                       ┌─────────────────────────┐
                       │   get_available_tools() │
-                      │   (src/tools/__init__)  │
+                      │   (packages/harness/deerflow/tools/__init__)  │
                       └─────────────────────────┘
 ```
 
@@ -217,7 +222,7 @@ class ThreadState(AgentState):
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          Model Factory                                   │
-│                     (src/models/factory.py)                              │
+│                     (packages/harness/deerflow/models/factory.py)                              │
 └─────────────────────────────────────────────────────────────────────────┘
 
 config.yaml:
@@ -264,7 +269,7 @@ config.yaml:
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          MCP Integration                                 │
-│                        (src/mcp/manager.py)                              │
+│                        (packages/harness/deerflow/mcp/manager.py)                              │
 └─────────────────────────────────────────────────────────────────────────┘
 
 extensions_config.json:
@@ -302,7 +307,7 @@ extensions_config.json:
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          Skills System                                   │
-│                       (src/skills/loader.py)                             │
+│                       (packages/harness/deerflow/skills/loader.py)                             │
 └─────────────────────────────────────────────────────────────────────────┘
 
 Directory Structure:
@@ -402,6 +407,21 @@ SKILL.md Format:
    - UploadsMiddleware lists files
    - Injects file list into messages
    - Agent can access via virtual_path
+```
+
+### Thread Cleanup Flow
+
+```
+1. Client deletes conversation via LangGraph
+   DELETE /api/langgraph/threads/{thread_id}
+
+2. Web UI follows up with Gateway cleanup
+   DELETE /api/threads/{thread_id}
+
+3. Gateway removes local DeerFlow-managed files
+   - Deletes .deer-flow/threads/{thread_id}/ recursively
+   - Missing directories are treated as a no-op
+   - Invalid thread IDs are rejected before filesystem access
 ```
 
 ### Configuration Reload

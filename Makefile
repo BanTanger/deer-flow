@@ -1,10 +1,13 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config check install dev dev-daemon start stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config config-upgrade check install dev dev-daemon start stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+
+PYTHON ?= python
 
 help:
 	@echo "DeerFlow Development Commands:"
 	@echo "  make config          - Generate local config files (aborts if config already exists)"
+	@echo "  make config-upgrade  - Merge new fields from config.example.yaml into config.yaml"
 	@echo "  make check           - Check if all required tools are installed"
 	@echo "  make install         - Install all dependencies (frontend + backend)"
 	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
@@ -19,7 +22,7 @@ help:
 	@echo "  make down            - Stop and remove production Docker containers"
 	@echo ""
 	@echo "Docker Development Commands:"
-	@echo "  make docker-init     - Build the custom k3s image (with pre-cached sandbox image)"
+	@echo "  make docker-init     - Pull the sandbox image"
 	@echo "  make docker-start    - Start Docker services (mode-aware from config.yaml, localhost:2026)"
 	@echo "  make docker-stop     - Stop Docker development services"
 	@echo "  make docker-logs     - View Docker development logs"
@@ -27,17 +30,14 @@ help:
 	@echo "  make docker-logs-gateway - View Docker gateway logs"
 
 config:
-	@if [ -f config.yaml ] || [ -f config.yml ] || [ -f configure.yml ]; then \
-		echo "Error: configuration file already exists (config.yaml/config.yml/configure.yml). Aborting."; \
-		exit 1; \
-	fi
-	@cp config.example.yaml config.yaml
-	@test -f .env || cp .env.example .env
-	@test -f frontend/.env || cp frontend/.env.example frontend/.env
+	@$(PYTHON) ./scripts/configure.py
+
+config-upgrade:
+	@./scripts/config-upgrade.sh
 
 # Check required tools
 check:
-	@./scripts/check.sh
+	@$(PYTHON) ./scripts/check.py
 
 # Install all dependencies
 install:
@@ -75,9 +75,13 @@ setup-sandbox:
 	fi; \
 	if command -v docker >/dev/null 2>&1; then \
 		echo "Pulling image using Docker..."; \
-		docker pull "$$IMAGE"; \
-		echo ""; \
-		echo "✓ Sandbox image pulled successfully"; \
+		if docker pull "$$IMAGE"; then \
+			echo ""; \
+			echo "✓ Sandbox image pulled successfully"; \
+		else \
+			echo ""; \
+			echo "⚠ Failed to pull sandbox image (this is OK for local sandbox mode)"; \
+		fi; \
 	else \
 		echo "✗ Neither Docker nor Apple Container is available"; \
 		echo "  Please install Docker: https://docs.docker.com/get-docker/"; \
@@ -100,7 +104,7 @@ dev-daemon:
 stop:
 	@echo "Stopping all services..."
 	@-pkill -f "langgraph dev" 2>/dev/null || true
-	@-pkill -f "uvicorn src.gateway.app:app" 2>/dev/null || true
+	@-pkill -f "uvicorn app.gateway.app:app" 2>/dev/null || true
 	@-pkill -f "next dev" 2>/dev/null || true
 	@-pkill -f "next start" 2>/dev/null || true
 	@-pkill -f "next-server" 2>/dev/null || true
